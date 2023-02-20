@@ -1,4 +1,4 @@
-from Lib import log, EXCEPTION_HANDLER
+from b_lib import log, EXCEPTION_HANDLER
 import logging.config
 import logging
 import traceback
@@ -16,10 +16,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
 import shutil
-from Lib.b_eosdo import BusinessEosdo
-from Lib.b_eosdo import Selector
-from Lib.b_outlook import BusinessOutlook
-import base64
+from b_lib.b_eosdo import BusinessEosdo
+from b_lib.b_eosdo import Selector
+from b_lib.b_post import BusinessPost
 from eosdoreceive import EosdoReceive
 from sender import Sender
 from datetime import datetime
@@ -48,8 +47,8 @@ class EosdoMon(BusinessEosdo):
             self.search_document(task)
         except Exception as err:
             logging.error(f'Мониторинг документа по запросу {task} закончилось неудачно. {err}.')
-            self.db.do_change_db(task, {'ОШИБКИ':'Не предвиденная ошибка'})
-            BusinessOutlook().send_mail(cfg.support_email, cfg.robot_name, f'Не предвиденная ошибка {err}')
+            self.db.do_change_db(task, cfg.table_tasks, {'ОШИБКИ':'Не предвиденная ошибка'})
+            BusinessPost().send_mail(cfg.support_email, cfg.robot_name, f'Не предвиденная ошибка {err}')
             self.reconect_eosdo(organization)
             self.eosdo.find_element(Selector.search_doc).click()
 
@@ -66,7 +65,7 @@ class EosdoMon(BusinessEosdo):
             try:
                 self.open_eosdo(organization)
             except Exception:
-                EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
+                raise EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
         try:
             self.eosdo.find_element(Selector.search_doc).click()
         except Exception as err:
@@ -109,9 +108,9 @@ class EosdoMon(BusinessEosdo):
         """
         self.clean_dir(cfg.saved_files)
         self.task = task
-        self.queue = self.db.get_one(task, 'ЗАПРОС', 'dict')['header']['replayRoutingKey']
-        date = self.db.get_one(task, 'ДАТА_ПРОЕКТА', 'tuple')[0].strftime('%d.%m.%Y')
-        self.project = self.db.get_one(task, 'НОМЕР_ПРОЕКТА', 'tuple')[0]
+        self.queue = self.db.get_one(task, 'ЗАПРОС', cfg.table_tasks)['header']['replayRoutingKey']
+        date = self.db.get_one(task, 'ДАТА_ПРОЕКТА', cfg.table_eosdo).strftime('%d.%m.%Y')
+        self.project = self.db.get_one(task, 'НОМЕР_ПРОЕКТА', cfg.table_eosdo)
         # Очищаем дату регистрации
         element = self.eosdo.find_element(Selector.date_reg, 30)
         self.clean_fild(element)
@@ -142,9 +141,10 @@ class EosdoMon(BusinessEosdo):
         logging.info(f'Статус документа: {self.status}')
         self.version = self.eosdo.find_element(Selector.version_doc, 30).text.strip()
         logging.info(f'Версия документа документа: {self.version}')
-        self.create_list_sogl(task)  # создаем лист согласования, если не создан
+        #TODO:удалить после тестов
+        # self.create_list_sogl(task)  # создаем лист согласования, если не создан
         # записываю в лист согласования новую информауию, если есть изменения в статусе или версии
-        if self.check_event(date, task):
+        if self.check_event(task):
             if self.status == 'Доработка':
                 self.document_status_revision(task)
             elif self.status == 'Закрыт':
@@ -156,13 +156,16 @@ class EosdoMon(BusinessEosdo):
                 self.eosdo.find_element(Selector.button_clean, 30).click()
                 #Записываем изменения в БД
                 json_data = json.dumps(self.list_sogl, indent=4, ensure_ascii=False)
-                self.db.do_change_db(task, {'СТАТУС_ЕОСДО': self.status, 'ЛИСТ_СОГЛАСОВАНИЯ': json_data})
+                self.db.do_change_db(task,
+                                     cfg.table_eosdo,
+                                     {'СТАТУС_ЕОСДО': self.status, 'ЛИСТ_СОГЛАСОВАНИЯ': json_data})
+                # обновляю в БД дату проверки документа
+                self.db.do_change_db(task, cfg.table_tasks)
                 #Отправляем в шину лист согласования
                 self.send_to_queue(task)
-
         else:
             # обновляю в БД дату проверки документа
-            self.db.do_change_db(task)
+            self.db.do_change_db(task, cfg.table_tasks)
             # Выхожу из документа
             self.eosdo.find_element(Selector.button_cansel).click()
         logging.info(f'Мониторинг проекта: {self.project} завершен')
@@ -179,19 +182,36 @@ class EosdoMon(BusinessEosdo):
         date = re.findall(r'\d{2}.\d{2}.\d{4}', text)[0]
         files = len(self.eosdo.find_elements(Selector.amount_added_files, 30))
         self.export_files(path=cfg.saved_files, amount_files=files)
-        type_delivery = self.db.get_one(task, 'СПОСОБ_ОТПРАВКИ', 'tuple')[0]
+        # TODO: непонятно зачем??? Записываем данные в словарик. Пока закомментируем
+        # files_encoded = self.encode_base64(fr"{cfg.saved_files}\Закрыт")
+        # data = self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', 'tuple')[0]
+        # data['регистрационный_номер'] = reg_number
+        # data['дата_регистрации'] = date
+        # data['документы'] = []
+        # data['документы'].append(files_encoded)
+        type_delivery = self.db.get_one(task, 'СПОСОБ_ОТПРАВКИ', cfg.table_tasks)
         logging.info(f'Способ доставки: {type_delivery}')
         if type_delivery == 'электронная почта' or type_delivery == 'смешанный':
             list_sogl = json.dumps(self.list_sogl, indent=4, ensure_ascii=False)
             try:
-                if Sender().sending(task, reg_number, self.project, self.queue):
+                theme = f'{reg_number.replace("/", "-", 1)}_{date}'
+                if Sender().sending(task, theme, self.project, self.queue):
                     self.db.do_change_db(
-                        task, {
+                        task,
+                        cfg.table_eosdo,
+                        {
                             'СТАТУС_ЕОСДО': self.status,
                             'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl,
-                            'СТАТУС': 'Отправлено',
                             'РЕГ_НОМЕР': reg_number,
-                            'ДАТА_РЕГ': datetime.strptime(date, '%d.%m.%Y')
+                            'ДАТА_РЕГ': datetime.strptime(date, '%d.%m.%Y'),
+                        }
+                    )
+                    self.db.do_change_db(
+                        task,
+                        cfg.table_tasks,
+                        {
+                            'СТАТУС': 'Отправлено',
+                            'ТЕМА_ПИСЬМА': theme
                         }
                     )
                 #если возникли ошибки при отправке
@@ -199,7 +219,9 @@ class EosdoMon(BusinessEosdo):
                     raise
             except Exception:
                 self.db.do_change_db(
-                    task, {
+                    task,
+                    cfg.table_eosdo,
+                    {
                         'СТАТУС_ЕОСДО': self.status,
                         'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl,
                         'РЕГ_НОМЕР': reg_number,
@@ -249,10 +271,18 @@ class EosdoMon(BusinessEosdo):
         self.send_to_queue(task)
         list_sogl = json.dumps(self.list_sogl, indent=4, ensure_ascii=False)
         self.db.do_change_db(
-            task, {
+            task,
+            cfg.table_eosdo,
+            {
                 'СТАТУС_ЕОСДО': self.status,
-                'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl,
-                'СТАТУС':'Обработан'
+                'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl
+            }
+        )
+        self.db.do_change_db(
+            task,
+            cfg.table_tasks,
+            {
+                'СТАТУС': 'Обработан'
             }
         )
 
@@ -312,8 +342,7 @@ class EosdoMon(BusinessEosdo):
                 approval_queue = self.eosdo.find_element(fr'{Selector.approve_rows}[{index}]//td[6]',
                                                          10).text.replace('(', '').replace(')', '')
                 save_dir = os.path.join(cfg.saved_files, approval_queue, fio)
-
-                # кликаем по скрепке сохранение фалов
+                # кликаем по скрепке сохранение файлов
                 self.eosdo.find_element(f'{Selector.approve_rows}[{index}]//td[14]//button').click()
                 WebDriverWait(self.eosdo.driver, 30).until(
                     EC.visibility_of_element_located((By.XPATH, Selector.dialog_body)))
@@ -329,7 +358,7 @@ class EosdoMon(BusinessEosdo):
                     count_file = 0  # число файлов 'с принятыми правками НК'
                     # перебираем файлы в скрепке
                     for file in range(1, amount_files + 1):
-                        if 'с принятыми правками НК' in self.eosdo.find_element(
+                        if 'с принятыми правками' in self.eosdo.find_element(
                                 fr'//table[@id="component15-files"]//tbody//tr[{file}]//td[4]', 10).text.strip() and \
                                 'DOC' in self.eosdo.find_element(f'{Selector.tbody}//tr[{file}]//td[7]').text.strip():
                             # кликаем по чекбоксу
@@ -349,11 +378,15 @@ class EosdoMon(BusinessEosdo):
                         # Записываем всю информацию в БД
                         list_sogl = json.dumps(self.list_sogl, indent=4, ensure_ascii=False)
                         self.db.do_change_db(
-                            task, {
+                            task,
+                            cfg.table_eosdo,
+                        {
                                 'СТАТУС_ЕОСДО': self.status,
                                 'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl
                             }
                         )
+                        # Отправляем в ЕОСЗ sogl
+                        self.send_to_queue(task)
                         return
                     else:
                         # если файлов 'с принятыми правками НК' не найдено, то сохраняем все файлы Отклонившего
@@ -371,9 +404,18 @@ class EosdoMon(BusinessEosdo):
         self.send_to_queue(task)
         list_sogl = json.dumps(self.list_sogl, indent=4, ensure_ascii=False)
         self.db.do_change_db(
-            task, {
+            task,
+            cfg.table_eosdo,
+            {
                 'СТАТУС_ЕОСДО': 'Доработка',
                 'ЛИСТ_СОГЛАСОВАНИЯ': list_sogl,
+            }
+        )
+
+        self.db.do_change_db(
+            task,
+            cfg.table_tasks,
+            {
                 'СТАТУС': 'Обработан'
             }
         )
@@ -409,6 +451,7 @@ class EosdoMon(BusinessEosdo):
                             self.eosdo.find_element(Selector.button_main).click()
                             count_file += 1
                             time.sleep(2)
+                            return
                         else:
                             element.click()
                             logging.info(f'Снимаю флаг основной с  {element.text.lower()}')
@@ -417,7 +460,6 @@ class EosdoMon(BusinessEosdo):
                     if count_file == 0:
                         logging.error('Файлы "принятыми правками нк" не найдены')
                         raise EXCEPTION_HANDLER.NotFoundDocument('Файлы "принятыми правками нк" не найдены')
-                    return
             except TimeoutException as err:
                 max_tries -= 1
                 logging.info('Окно загрузки не пропадает. Нажимаю Esc')
@@ -481,7 +523,7 @@ class EosdoMon(BusinessEosdo):
         self.files_added = False
         raise
 
-    def check_event(self, date, task):
+    def check_event(self, task):
         """
         Есть ли изменения в документе
         :param date: дата проекта документа
@@ -491,7 +533,7 @@ class EosdoMon(BusinessEosdo):
         logging.info('Открываю вкладку "Согласование и подписание"')
         self.eosdo.find_element(Selector.tab_approval).click()
         events = len(self.eosdo.find_elements(Selector.approve_rows, 30))
-        sogl_list = self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', 'tuple')[0]
+        sogl_list = self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', cfg.table_eosdo)
         for event in range(1, events + 1):
             fio = self.eosdo.find_element(f'{Selector.approve_rows}[{event}]//td[9]', 10).text
             comment = self.eosdo.find_element(f'{Selector.approve_rows}[{event}]//td[13]', 10).text
@@ -542,69 +584,72 @@ class EosdoMon(BusinessEosdo):
         else:
             return False
 
-    def create_list_sogl(self, task):
-        """
-        Создание листа согласования
-        :return:
-        """
-        if self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', 'tuple')[0] is not None:
-            logging.info('Лист Согласования существует')
-            return
-
-        self.eosdo.find_element(Selector.tab_approval).click()
-        logging.info('Создаю Лист согласования')
-        sogl_list = {}
-        queue = ''
-        sogl_list['проект'] = self.project
-        sogl_list['версия'] = self.version
-        sogl_list['статус'] = self.status
-        sogl_list['почта'] = ''
-        sogl_list['лист_согласования'] = {}
-        time.sleep(3)
-        elements = self.eosdo.find_elements(r'//table[@id="queues"]//tbody//tr', 20)
-        rows = len(elements)
-        for index in range(1, rows + 1):
-            element = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td', 30)
-            if element.get_attribute('colspan') == '9':
-                queue = self.eosdo.find_element(
-                    fr'//table[@id="queues"]//tr[{index}]//td//div[@class="form-control slct dropdown-toggle prevent-user-select disabled"][1]',
-                    30).text
-                sogl_list['лист_согласования'][queue] = []
-            else:
-                dict_queue = {
-                    'фио': '',
-                    'должность': '',
-                    'подразделение': '',
-                    'организация': '',
-                    'решение': '',
-                    'дата_решения': '',
-                    'комментарии': '',
-                    'вложения': []
-                }
-                fio = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[3]').text
-                position = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[5]').text
-                group = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[6]').text
-                organization = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[7]').text
-                solution = "Ожидается"
-                date_solution = ""
-                comments = ""
-                dict_queue['фио'] = fio
-                dict_queue['должность'] = position
-                dict_queue['подразделение'] = group
-                dict_queue['организация'] = organization
-                dict_queue['решение'] = solution
-                dict_queue['дата_решения'] = date_solution
-                dict_queue['комментарии'] = comments
-                sogl_list['лист_согласования'][queue].append(dict_queue)
-
-        list_sogl = json.dumps(sogl_list, indent=4, ensure_ascii=False)
-        self.db.do_change_db(
-            task, {
-                'СТАТУС_ЕОСДО':self.status,
-                'ЛИСТ_СОГЛАСОВАНИЯ':list_sogl
-            }
-        )
-        logging.info('Лист согласования создан и записан в БД')
+    # TODO:удалить после тестов
+    # def create_list_sogl(self, task):
+    #     """
+    #     Создание листа согласования
+    #     :return:
+    #     """
+    #     if self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', 'tuple')[0] is not None:
+    #         logging.info('Лист Согласования существует')
+    #         return
+    #
+    #     self.eosdo.find_element(Selector.tab_approval).click()
+    #     logging.info('Создаю Лист согласования')
+    #     sogl_list = {}
+    #     queue = ''
+    #     sogl_list['проект'] = self.project
+    #     sogl_list['версия'] = self.version
+    #     sogl_list['статус'] = self.status
+    #     sogl_list['почта'] = ''
+    #     sogl_list['лист_согласования'] = {}
+    #     time.sleep(3)
+    #     elements = self.eosdo.find_elements(r'//table[@id="queues"]//tbody//tr', 20)
+    #     rows = len(elements)
+    #     for index in range(1, rows + 1):
+    #         element = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td', 30)
+    #         if element.get_attribute('colspan') == '9':
+    #             queue = self.eosdo.find_element(
+    #                 fr'//table[@id="queues"]//tr[{index}]//td//div[@class="form-control slct dropdown-toggle prevent-user-select disabled"][1]',
+    #                 30).text
+    #             sogl_list['лист_согласования'][queue] = []
+    #         else:
+    #             dict_queue = {
+    #                 'фио': '',
+    #                 'должность': '',
+    #                 'подразделение': '',
+    #                 'организация': '',
+    #                 'решение': '',
+    #                 'дата_решения': '',
+    #                 'комментарии': '',
+    #                 'вложения': []
+    #             }
+    #             fio = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[3]').text
+    #             position = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[5]').text
+    #             group = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[6]').text
+    #             organization = self.eosdo.find_element(fr'//table[@id="queues"]//tr[{index}]//td[7]').text
+    #             solution = "Ожидается"
+    #             date_solution = ""
+    #             comments = ""
+    #             dict_queue['фио'] = fio
+    #             dict_queue['должность'] = position
+    #             dict_queue['подразделение'] = group
+    #             dict_queue['организация'] = organization
+    #             dict_queue['решение'] = solution
+    #             dict_queue['дата_решения'] = date_solution
+    #             dict_queue['комментарии'] = comments
+    #             sogl_list['лист_согласования'][queue].append(dict_queue)
+    #
+    #     list_sogl = json.dumps(sogl_list, indent=4, ensure_ascii=False)
+    #     self.db.do_change_db(
+    #         task, {
+    #             'СТАТУС_ЕОСДО':self.status,
+    #             'ЛИСТ_СОГЛАСОВАНИЯ':list_sogl
+    #         }
+    #     )
+    #     # self.db.create_sogl_db(task, sogl_list)
+    #     # self.db.update_status(self.status, task, 'еосдо')
+    #     logging.info('Лист согласования создан и записан в БД')
 
     def remove_dir(self, dir, max_tries=5):
         """
@@ -633,9 +678,38 @@ class EosdoMon(BusinessEosdo):
         :param approval_queue: очередь согласования
         :param max_tries: число попыток
         """
-        files_encoded = self.encode_base64(fr"{cfg.saved_files}\{approval_queue}\{fio}")
+        files_encoded = self.tools.encode_base64(fr"{cfg.saved_files}\{approval_queue}\{fio}")
+
+        # TODO:удалить после положительных тестов
+        # for file in os.listdir(fr"{cfg.saved_files}\{approval_queue}\{fio}"):
+        #     with open(fr"{cfg.saved_files}\{approval_queue}\{fio}\{file}", 'rb') as f:
+        #         doc64 = base64.b64encode(f.read())
+        #         logging.info(f'Закодировал {file} в base64')
+        #         doc_str = doc64.decode('utf-8')
+        #         files_encoded['file_name'] = file
+        #         files_encoded['file'] = doc_str
+
         for queue in self.list_sogl["лист_согласования"][approval_queue]:
             if queue['фио'] == fio:
                 queue['вложения'].append(files_encoded)
                 logging.info(f'Вложения внесены в лист согласования для {fio} в очередь {approval_queue}')
                 break
+
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    log.set_2(cfg)
+    logging.config.dictConfig({
+        'version': 1,
+        'disable_existing_loggers': True,
+    })
+
+    logging.info('\n\n=== Start ===\n\n')
+    logging.info(f'Режим запуска: {cfg.mode}')
+    eosdo = EosdoReceive()
+    eosdo.start_process("АО \"Гринатом\"")

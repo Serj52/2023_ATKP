@@ -1,9 +1,6 @@
-from Lib import log, EXCEPTION_HANDLER
+from b_lib import log, EXCEPTION_HANDLER
 import logging.config
 import logging
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
 from datetime import datetime
 import time
 import pyperclip
@@ -19,8 +16,8 @@ from pathlib import Path
 import os
 from selenium.common.exceptions import TimeoutException
 import shutil
-from Lib.b_eosdo import BusinessEosdo, Selector
-from Lib.b_outlook import BusinessOutlook
+from b_lib.b_eosdo import BusinessEosdo, Selector
+from b_lib.b_post import BusinessPost
 import uuid
 from eosdomon import EosdoMon, EosdoReceive
 
@@ -38,7 +35,7 @@ class EosdoReg(BusinessEosdo):
         self.date_related_document = None
         self.attachments = None
         self.template = None
-
+        self.list_delivery = None
 
     @EXCEPTION_HANDLER.exception_decorator
     def start_process(self, tasks, organization):
@@ -52,7 +49,7 @@ class EosdoReg(BusinessEosdo):
         try:
             self.open_eosdo(organization)
         except Exception:
-            EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
+            raise EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
         for task in tasks:
             logging.info(f'Создаю документ для запроса: {task}')
             try:
@@ -95,8 +92,8 @@ class EosdoReg(BusinessEosdo):
             logging.info(f'Закончил обработку запроса {task}')
         except Exception as err:
             logging.info(f'Создание документа по запросу {task} закончилось неудачно. {err}')
-            self.db.do_change_db(task, {'ОШИБКИ':'Не предвиденная ошибка'})
-            BusinessOutlook().send_mail(cfg.support_email, cfg.robot_name, f'Не предвиденная ошибка {err}')
+            self.db.do_change_db(task, cfg.table_tasks, {'ОШИБКИ':'Не предвиденная ошибка'})
+            BusinessPost().send_mail(cfg.support_email, cfg.robot_name, f'Не предвиденная ошибка {err}')
             self.reconect_eosdo(organization)
 
     def get_parameters(self, task):
@@ -106,8 +103,7 @@ class EosdoReg(BusinessEosdo):
         :return:
         """
         try:
-            parameters = self.db.get_one(task, 'ЗАПРОС', 'dict')
-            self.queue = parameters['body']['organization']
+            parameters = self.db.get_one(task, 'ЗАПРОС', cfg.table_tasks)
             self.organization = parameters['body']['organization']
             self.initiator = parameters['body']['initiator']
             self.staff_position = parameters['body']['staff_position']
@@ -134,9 +130,15 @@ class EosdoReg(BusinessEosdo):
             for temp in template:
                 self.eosdo.find_element(f'//a[contains(text(),"{temp}")]', timeout=30).click()
             self.eosdo.find_element(Selector.button_select, timeout=30).click()
-            logging.info('Шаблон найден')
-            self.template = template
+            time.sleep(1)
+            #Если шаблон не добавился вызываем исключение
+            if self.eosdo.exists_by_xpath("//div[contains(text(), 'Шаблоны')]") is True:
+                raise TimeoutException
+            else:
+                logging.info('Шаблон найден')
+                self.template = template
         except TimeoutException:
+            logging.error('Шаблон не найден')
             self.eosdo.find_element("//button[contains(text(), 'Отменить')]", timeout=30).click()
             raise EXCEPTION_HANDLER.TemplateError(f'Шаблон {template} не найден')
 
@@ -149,23 +151,23 @@ class EosdoReg(BusinessEosdo):
         if self.type_request == 'дозапрос':
             # В дозапросе сначала заполняется третья вкладка
             self.fill_third_tab()
-            self.fill_first_tab(task)
+            self.fill_first_tab()
         else:
-            self.fill_first_tab(task)
+            self.fill_first_tab()
         self.fill_second_tab()
         self.save_project(task)
 
-    def fill_first_tab(self, task):
+    def fill_first_tab(self):
         """
         Функция заполнения вкладки Основные реквизиты
         :return:
         """
-        self.fill_fields(task)
+        self.fill_fields()
         self.add_file()
         self.mark_as_main()
         self.insert_amount_page()
 
-    def fill_fields(self, task):
+    def fill_fields(self):
         """
         Заполнение полей во вкладке Основные реквизиты
         :return:
@@ -178,11 +180,10 @@ class EosdoReg(BusinessEosdo):
         self.eosdo.find_element(Selector.employee_page1).click()
         self.search_employee()
         # Заполнить поле Способ Доставки
-        self.search_organization(task)
-
+        self.search_organization()
         logging.info('Вкладка Основные реквизиты заполнена')
 
-    def search_organization(self, task):
+    def search_organization(self):
         """
         Поиск организации на вкладке Основные реквизиты
         :return:
@@ -191,22 +192,27 @@ class EosdoReg(BusinessEosdo):
         for organization in self.reseivers_list:
             type_organization = self.reseivers_list[organization]['type']
             self.reseivers_list[organization]['статус'] = ''
-            if type_organization.lower() == 'отрослевая':
-                self.eosdo.find_element(Selector.organization_inside).click()
-                type_delivery.append('еосдо')
-            elif type_organization.lower() == 'не отрослевая':
-                self.eosdo.find_element(Selector.organization_outside).click()
-                type_delivery.append('электронная_почта')
-            self.eosdo.find_element(Selector.fild_search, 30).send_keys(organization)
-            self.eosdo.find_element(Selector.button_search).click()
             try:
+                if type_organization.lower() == 'отрослевая':
+                    self.eosdo.find_element(Selector.organization_inside).click()
+                    type_delivery.append('еосдо')
+                elif type_organization.lower() == 'не отраслевая':
+                    self.eosdo.find_element(Selector.organization_outside).click()
+                    type_delivery.append('электронная_почта')
+                else:
+                    logging.error('Некорректно уканаз тип организации в запросе')
+                    raise TimeoutException
+                self.eosdo.find_element(Selector.fild_search, 30).send_keys(organization)
+                self.eosdo.find_element(Selector.button_search).click()
                 self.eosdo.find_element(fr"//a[contains(text(),'{organization}')]", timeout=30).click()
                 self.eosdo.find_element(Selector.button_add, 30).click()
             except TimeoutException:
                 logging.error(f'Организация {organization} не добавлена')
-                self.eosdo.find_element(Selector.button_cansel, timeout=30).click()
+                #если мы не заходили в окно справочника
+                if self.eosdo.exists_by_xpath("//div[contains(text(), 'Исходящий документ')]") is False:
+                    self.eosdo.find_element(Selector.button_cansel, timeout=30).click()
+                time.sleep(1)
                 if self.eosdo.exists_by_xpath(Selector.block, 1):
-                    time.sleep(5)
                     keyboard.send_keys("{ESC}")
                 self.eosdo.find_element(Selector.button_save, timeout=30).click()
                 self.eosdo.find_element(Selector.button_ok, timeout=30).click()
@@ -237,8 +243,7 @@ class EosdoReg(BusinessEosdo):
             self.type_delivery = 'электронная почта'
         elif 'еосдо' in type_delivery:
             self.type_delivery = 'еосдо'
-        json_data = json.dumps(self.reseivers_list, indent=4, ensure_ascii=False)
-        self.db.do_change_db(task, {'СПИСОК_РАССЫЛКИ': json_data})
+        self.list_delivery = json.dumps(self.reseivers_list, indent=4, ensure_ascii=False)
 
     def apply_delivery(self, organization: str, type_delivery: str):
         """
@@ -314,11 +319,15 @@ class EosdoReg(BusinessEosdo):
         Выход из карточки документа в случае не найденных данных
         :return:
         """
+        logging.info('Ошибка. Выхожу из карточки документа')
         if self.eosdo.exists_by_xpath(Selector.block, 1):
             time.sleep(5)
             keyboard.send_keys("{ESC}")
+        #проверка находимся ли мы в карточке или внутри справочника
+        if self.eosdo.exists_by_xpath("//div[contains(text(), 'Исходящий документ')]") is False:
+            self.eosdo.find_element(Selector.button_cansel, timeout=30).click()
         self.eosdo.find_element(Selector.button_cansel, timeout=30).click()
-        self.eosdo.find_element(Selector.button_cansel, timeout=30).click()
+
         self.eosdo.find_element(Selector.button_ok, timeout=30).click()
 
     def add_file(self, max_tries=130):
@@ -327,13 +336,18 @@ class EosdoReg(BusinessEosdo):
         :param max_tries: число попыток открыть Проводник
         :return:
         """
-        body_task = self.db.get_one(self.task, 'ЗАПРОС', 'dict')
-        # получаем список файлов из тела запроса
-        files_task = body_task['body']["files"]
-        for file in files_task:
-            with open(os.path.join(cfg.saved_files, file['file_name']), "wb") as newfile:
-                #декодируем файлы из base64 и сохраняем в Saved_files
-                newfile.write(base64.b64decode(file["file"]))
+        try:
+            body_task = self.db.get_one(self.task, 'ЗАПРОС', cfg.table_tasks)
+            # получаем список файлов из тела запроса
+            files_task = body_task['body']["files"]
+            for file in files_task:
+                with open(os.path.join(cfg.saved_files, file['file_name']), "wb") as newfile:
+                    #декодируем файлы из base64 и сохраняем в Saved_files
+                    newfile.write(base64.b64decode(file["file"]))
+        except Exception:
+            self.error_worker()
+            raise EXCEPTION_HANDLER.AddedFileError('Ошибка при сохранении файлов из запроса')
+
 
         logging.info(f'Открываю документы ')
         self.eosdo.find_element(Selector.button_add_file, 30)
@@ -357,8 +371,8 @@ class EosdoReg(BusinessEosdo):
                     time.sleep(1)
                 win.child_window(title="Open", auto_id="1", control_type="Button").click_input()
                 return
-        logging.error('Проводник не открылся.')
-        raise
+        self.error_worker()
+        raise EXCEPTION_HANDLER.AddedFileError('Экспортер не открылся')
 
     def mark_as_main(self):
         """
@@ -374,11 +388,12 @@ class EosdoReg(BusinessEosdo):
                     self.eosdo.find_element(Selector.button_main).click()
                     logging.info(f'Флаг установлен')
                     return
-            logging.error('шибка при устанавке флага "Основной" Не найден файл Запрос')
+            logging.error('Ошибка при устанавке флага "Основной" Не найден файл Запрос')
             raise
         except Exception as err:
-                logging.error(f'Ошибка при устанавке флага "Основной" {err}')
-                raise
+            logging.error(f'Ошибка при установке флага "Основной" {err}')
+            self.error_worker()
+            raise EXCEPTION_HANDLER.AddedFileError('Проверьте формат файла Запрос')
 
     def insert_amount_page(self):
         """
@@ -491,14 +506,47 @@ class EosdoReg(BusinessEosdo):
                 project = re.findall(r'\d{1,}\W\d{1,}-ПРОЕКТ', clean_text)[0]
                 date = re.findall(r'\d\d.\d\d.\d\d\d\d', clean_text)[0]
                 self.eosdo.find_element(r'//button[contains(text(),"Завершить")]').click()
-                link_project = self.get_link_project(project, date)
+                #Повторно открываем карточку
+                self.eosdo.find_element(Selector.search_doc).click()
+                # Очищаем дату регистрации
+                element = self.eosdo.find_element(Selector.date_reg, 30)
+                self.clean_fild(element)
+                time.sleep(1)
+                # Вбиваем дату проекта
+                self.eosdo.find_element(Selector.date_project, 20).send_keys(date)
+                # Вбиваем проект
+                self.eosdo.find_element(Selector.project_number).send_keys(project)
+                # Нажимаем поиск
+                self.eosdo.find_element(Selector.button_search_doc).click()
+                # перехожу в проект
+                time.sleep(1)
+                self.eosdo.double_click(fr'//span[text()="{project}"]', 10)
+                # копирую ссылку
+                self.eosdo.find_element(Selector.link_project, 10).click()
+                version = self.eosdo.find_element(Selector.version_doc, 30).text.strip()
+                status = self.eosdo.find_element(Selector.status_doc, 30).text.strip()
+                link_project = pyperclip.paste()
+                list_sogl = self.create_list_sogl(project=project, version=version, status=status)
+                #выхожу из карточки
+                self.eosdo.find_element(Selector.button_cansel).click()
+                self.eosdo.find_element(Selector.button_cansel).click()
+                # записывваем данные в таблицу eosdo_427
+                self.db.add_project_db(
+                    task,
+                    project,
+                    datetime.strptime(date, '%d.%m.%Y'),
+                    list_sogl,
+                    link_project,
+                    status
+                )
+                # обновляем данные в таблицt tasks_427
                 self.db.do_change_db(
-                    task, {
-                        'НОМЕР_ПРОЕКТА': project,
-                        'ДАТА_ПРОЕКТА': datetime.strptime(date, '%d.%m.%Y'),
+                    task,
+                    cfg.table_tasks,
+                    {
+                        'СТАТУС': 'Мониторинг',
                         'СПОСОБ_ОТПРАВКИ': self.type_delivery,
-                        'ССЫЛКА': link_project,
-                        'СТАТУС':'Мониторинг'
+                        'СПИСОК_РАССЫЛКИ': self.list_delivery
                     }
                 )
                 # logging.info(f'Проект {project} отправлен на согласование в ЕОСДО')
@@ -521,26 +569,6 @@ class EosdoReg(BusinessEosdo):
                           f'Проверьте последние созданные документы: {err}')
             raise EXCEPTION_HANDLER.SaveProjectError('Ошибка при сохранении проекта')
 
-    def get_link_project(self, project, date):
-        self.eosdo.find_element(Selector.search_doc).click()
-        # Очищаем дату регистрации
-        element = self.eosdo.find_element(Selector.date_reg, 30)
-        self.clean_fild(element)
-        time.sleep(1)
-        # Вбиваем дату проекта
-        self.eosdo.find_element(Selector.date_project, 20).send_keys(date)
-        # Вбиваем проект
-        self.eosdo.find_element(Selector.project_number).send_keys(project)
-        # Нажимаем поиск
-        self.eosdo.find_element(Selector.button_search_doc).click()
-        # перехожу в проект
-        time.sleep(1)
-        self.eosdo.double_click(fr'//span[text()="{project}"]', 10)
-        #копирую ссылку
-        self.eosdo.find_element(Selector.link_project, 10).click()
-        link = pyperclip.paste()
-        #выхожу из карточки
-        self.eosdo.find_element(Selector.button_cansel).click()
-        self.eosdo.find_element(Selector.button_cansel).click()
-        logging.info('Ссылка на документ скопирована')
-        return link
+
+
+

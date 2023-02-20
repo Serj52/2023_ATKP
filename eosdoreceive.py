@@ -12,10 +12,10 @@ from selenium.webdriver.common.keys import Keys
 import re
 import os
 from selenium.common.exceptions import TimeoutException
-from Lib.b_eosdo import BusinessEosdo
-from Lib.b_eosdo import Selector
-from Lib.b_outlook import BusinessOutlook
-from Lib import EXCEPTION_HANDLER
+from b_lib.b_eosdo import BusinessEosdo
+from b_lib.b_eosdo import Selector
+from b_lib.b_post import BusinessPost
+from b_lib import EXCEPTION_HANDLER
 
 
 
@@ -42,7 +42,7 @@ class EosdoReceive(BusinessEosdo):
             try:
                 self.open_eosdo(organization)
             except Exception:
-                EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
+                raise EXCEPTION_HANDLER.OpenEOSDOError('Ошибка при открытии ЕОСДО')
         try:
             self.main_process(tasks)
         except Exception as err:
@@ -79,19 +79,20 @@ class EosdoReceive(BusinessEosdo):
             if self.unknown_document:
                 body = f'Нам прислали письмов ЕОСДО, которое не удалось идентифицировать. ' \
                        f'Просьба ознакомиться. Ссылки на документы: {self.unknown_document}'
-                BusinessOutlook().send_mail(cfg.support_email, cfg.robot_name, body)
+                BusinessPost().send_mail(cfg.support_email, cfg.robot_name, body)
                 logging.info('В поддержку направлено письмо о неизвестном письме в ЕОСДО')
         else:
             logging.info('Входящих писем в ЕОСДО нет')
             logging.info('Обработку вх документов в ЕОСДО закончил')
         # Записываем в базу данных дату проверки документов
-        self.db.do_change_db(self.tasks)
+        self.db.do_change_db(self.tasks, cfg.table_tasks)
         self.exit_eosdo()
 
     def document_process(self, incoming_documents, tasks, start):
         for document in range(start, incoming_documents + 1):
             reg = ''
             reseived = ''
+            summary = ''
             xpath_doc_row = f'//table[@id="InboxDataTable"]//tbody/tr[{document}]'
             time.sleep(1)
             try:
@@ -102,7 +103,10 @@ class EosdoReceive(BusinessEosdo):
             logging.info(f'Открываю документ {reg} от {reseived}')
             self.eosdo.double_click(xpath_doc_row, 10)
             # Проверяем краткое содержание на предмет рег.номера
-            summary = self.eosdo.find_element(Selector.text_area).text
+            try:
+                summary = self.eosdo.find_element(Selector.text_area).text
+            except Exception:
+                pass
             #получаю ссылку на документ
             self.eosdo.find_element(Selector.link_project, 10).click()
             link = pyperclip.paste()
@@ -129,7 +133,7 @@ class EosdoReceive(BusinessEosdo):
         count_page = 1
         while count_page <= 2:
             for index, task in enumerate(tasks):
-                reg_number = self.db.get_one(task, 'РЕГ_НОМЕР', 'tuple')[0]
+                reg_number = self.db.get_one(task, 'РЕГ_НОМЕР', cfg.table_eosdo)
                 if count_page == 1:
                     # Ищим рег номер документа в поле краткое содержание документа
                     if reg_number in summary:
@@ -153,6 +157,7 @@ class EosdoReceive(BusinessEosdo):
             count_page += 1
             # переходим во вкладку Связанные документы
             self.eosdo.find_element(Selector.tab_related_doc).send_keys(Keys.ENTER)
+            time.sleep(1)
         return False
 
     def set_filter(self):
@@ -176,7 +181,7 @@ class EosdoReceive(BusinessEosdo):
         :return:
         """
         # сохраняем номер и дату документа
-        queue = self.db.get_one(task, 'ЗАПРОС', 'dict')['header']['replayRoutingKey']
+        queue = self.db.get_one(task, 'ЗАПРОС', cfg.table_tasks)['header']['replayRoutingKey']
         text = self.eosdo.find_element(Selector.reg_number).text
         reg_number = re.findall(r'\d{1,}-\d{1,}\S{0,}\d{1,}', text)[0]
         date = re.findall(r'\d{2}.\d{2}.\d{4}', text)[0]
@@ -192,15 +197,41 @@ class EosdoReceive(BusinessEosdo):
         data['body']['номер'] = reg_number
         data['body']['дата'] = date
         data['body']['текст сообщения'] = summary
-        data['body']['files'] = self.encode_base64(cfg.saved_files)
+        data['body']['files'] = self.tools.encode_base64(cfg.saved_files)
         data_json = json.dumps(data, indent=2, ensure_ascii=False)
         self.rabbit.send_data_queue(queue, data_json)
         # записываю в БД отчет об отправке
         self.db.response_db(id, data, 'ОТВЕТ_ПОСТАВЩИКА', task)
-        self.db.update_list_delivery(task, sender)
+        self.update_list_delivery(task, sender)
         logging.info('Нажимаю "В дело"')
         self.eosdo.find_element(Selector.send_case).click()
         #удаляем задание из списка поиска
         self.tasks.pop(index)
         logging.info(f'Обработка ответа на {reg_number} закончено')
         self.clean_dir(cfg.saved_files)
+
+    def update_list_delivery(self, task, organization):
+        """
+        Запись статуса ответа от Поставщика
+        :param task: номер запроса в БД
+        :param organization: имя организации от которой получен ответ
+        :return:
+        """
+        #получаем текущий список рассылки
+        list_delivery = self.db.get_one(task, 'СПИСОК_РАССЫЛКИ', cfg.table_tasks)
+        # записываем статус 'получен'
+        try:
+            list_delivery[organization]['статус'] = 'получен'
+            no_answer = False
+            data_json = json.dumps(list_delivery, indent=2, ensure_ascii=False)
+            self.db.do_change_db(task, cfg.table_tasks, {'СПИСОК_РАССЫЛКИ': data_json})
+        except KeyError as err:
+            logging.error(f'В запросе {task} в СПИСКЕ_РАССЫЛКИ не найдено предприятие {organization}: {err}')
+            raise
+        for organization in list_delivery:
+            if list_delivery[organization]['статус'] == 'отправлено':
+                no_answer = True
+        if no_answer == False:
+            logging.info(f'По запросу {task} получены ответы от всех предприятий. Записываю в БД статус Закрыт')
+            self.db.do_change_db(task, cfg.table_tasks, {'СТАТУС': 'Закрыт'})
+

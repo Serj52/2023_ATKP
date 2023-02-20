@@ -1,15 +1,16 @@
-from Lib import log, DATABASE, RABBIT
+import time
+
+from b_lib import log, DATABASE, RABBIT
 import logging.config
 import logging
 import urllib3
 from CONFIG import Config as cfg
-from Lib.error_handler import ErrorHandler
-from Lib import EXCEPTION_HANDLER
+from b_lib.error_handler import ErrorHandler
+from b_lib import EXCEPTION_HANDLER
 from eosdomon import EosdoMon
 from eosdoreg import EosdoReg
 from eosdoreceive import EosdoReceive
 from sender import Sender
-from Lib.b_excel import Excel
 from jsonschema import validate
 import os
 from Templates.shema_json import schema
@@ -31,8 +32,7 @@ class TaskFinder:
             logging.info(f'Обрабатываю задания для {organization}')
             obj.start_process(tasks_organizations[organization], organization)
 
-
-    def validator(self, tasks):
+    def validator(self, tasks:list):
         valid_tasks = []
         for task in tasks:
             self.task_id = None
@@ -43,7 +43,9 @@ class TaskFinder:
                 validate(task, schema)
                 logging.info(f'Запрос {self.task_id} валиден.')
                 valid_tasks.append(task)
-            except jsonschema.exceptions.ValidationError as error:
+            except Exception as error:
+                if self.queue_response is None:
+                    self.queue_response = cfg.queue_error
                 logging.error(error)
                 EXCEPTION_HANDLER.ExceptionHandler().exception_handler(queue=self.queue_response,
                                                                        tasks=self.task_id,
@@ -70,13 +72,18 @@ class TaskFinder:
         if monitoring_tasks:
             logging.info(f'Получены задания со статусом Мониторинг:\n{monitoring_tasks}')
             self.run_process(self.eosdo_mon, monitoring_tasks)
-
+        #
         eosdo_incoming_tasks = self.db.get_sending_tasks()
         if eosdo_incoming_tasks:
             logging.info(f'Начинаю мониторинг вх.документов в ЕОСДО')
             self.run_process(self.eosdo_res, eosdo_incoming_tasks)
         # Проверка почты
-        self.sender.receiving()
+        eh = ErrorHandler('self.sender.receiving()', cfg, minutes_wait=5)
+        while True:
+            with eh:
+                self.sender.receiving()
+                break
+
 
     def prepare_tasks(self, tasks):
         """
@@ -99,6 +106,32 @@ class TaskFinder:
         with eh:
             while True:
                 self.main_process()
+
+
+
+
+
+
+
+if __name__ == '__main__':
+    log.set_1(cfg)
+    logging.config.dictConfig({
+        'version': 1,
+        'disable_existing_loggers': True,
+    })
+
+    logging.info('\n\n=== Start ===\n\n')
+    logging.info(f'Режим запуска: {cfg.mode}')
+    task_finder = TaskFinder()
+    task_finder.run()
+
+
+
+
+
+
+
+
 
 
 
