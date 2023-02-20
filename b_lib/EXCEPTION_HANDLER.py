@@ -69,65 +69,6 @@ def exception_decorator(method):
                                                      text_error='Проверьте кодировку. Ожидал json',
                                                      type_error='bad_request', to_rabbit='on')
 
-        #self.__class__.__name__
-        # except Exception as err:
-        #     logging.error(err)
-        #     self.eosdo.close_site()
-        #     ExceptionHandler().exception_handler(queue='self.queue_response',
-        #                                          task_id=self.task,
-        #                                          type_error='Не предвиденная ошибка'
-        #                                          )
-        #     self.open_eosdo(self.organization)
-        #     try:
-        #         logging.info(f'Начал повторную обработку запроса {self.task}')
-        #         self.task_process(self.task, self.organization)
-        #         logging.info(f'Закончил обработку запроса {self.task}')
-        #     except Exception as err:
-        #         logging.info(f'Создание документа по запросу {self.task} закончилось неудачно. {err}')
-        #         err.exception_handler(queue='self.queue_response',
-        #                               task_id=self.task,
-        #                               type_error='Не предвиденная ошибка'
-        #                               )
-        #         self.eosdo.close_site()
-
-        #     if method.__name__ == 'data_process':
-        #         ExceptionHandler().exception_handler(queue=self.queue_response,
-        #                                              task_id=self.task_id,
-        #                                              type_error='unknown_error',
-        #                                              to_rabbit='on',
-        #                                              to_mail='on'
-        #                                              )
-        #
-        #     elif method.__name__ == 'validator':
-        #         queue = self.queue_response
-        #         if queue is None:
-        #             queue = cfg.queue_error
-        #         task_id = self.task_id
-        #         if self.task_id is None:
-        #             task_id = ''
-        #         ExceptionHandler().exception_handler(queue=queue,
-        #                                              text_error='Ошибка в запросе',
-        #                                              task_id=task_id,
-        #                                              type_error='bad_request',
-        #                                              to_rabbit='on',
-        #                                              )
-        #
-        #     elif method.__name__ == 'run':
-        #         queue = self.queue_response
-        #         if queue is None:
-        #             queue = cfg.queue_error
-        #         task_id = self.task_id
-        #         if self.task_id is None:
-        #             task_id = ''
-        #         ExceptionHandler().exception_handler(queue=queue,
-        #                                              task_id=task_id,
-        #                                              forecast=self.forecast,
-        #                                              type_error='unknown_error',
-        #                                              to_rabbit='on',
-        #                                              to_mail='on'
-        #                                              )
-
-
     return wraper
 
 

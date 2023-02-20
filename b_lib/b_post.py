@@ -177,10 +177,6 @@ class BusinessPost:
             raise
 
 
-if __name__ == '__main__':
-    outlook = BusinessPost()
-    outlook.get_mail_data_by_subjects(['22-9.2-30'])
-
 
 
 
