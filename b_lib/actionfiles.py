@@ -1,11 +1,13 @@
 import random
 import string
+import os
+import shutil
 import base64
 import logging
 from pathlib import Path
 
 
-class Tools:
+class ActionFiles:
 
     def generator_id(self):
         letters_and_digits = string.ascii_letters + string.digits
@@ -13,9 +15,17 @@ class Tools:
         return rand_string
 
     @staticmethod
+    def clean_dir(path: str) -> None:
+        for file in os.listdir(path):
+            if os.path.isdir(os.path.join(path, file)):
+                shutil.rmtree(os.path.join(path, file), ignore_errors=False)
+            else:
+                os.remove(os.path.join(path, file))
+        logging.info(f'Директория {path} очищена')
+
+    @staticmethod
     def encode_base64(folder_path):
         """
-
         """
         result = []
         for file in Path(folder_path).iterdir():
@@ -33,3 +43,14 @@ class Tools:
         else:
             logging.error(f'Директория {folder_path} пустая')
             raise
+
+    @staticmethod
+    def move_to_reseiving(from_dir, to_dir):
+        """
+        Переместить файлы из папки Saved_files в папку проекта
+        :param dir_name: Имя папки проекта
+        :return:
+        """
+        for file in Path(from_dir).iterdir():
+            shutil.move(str(file), to_dir)
+            logging.info(f'Файл {file} перенесен в {to_dir}')

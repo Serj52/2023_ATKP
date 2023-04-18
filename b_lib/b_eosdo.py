@@ -2,14 +2,11 @@ import logging.config
 import logging
 import time
 import json
-import re
-from pathlib import Path
 from CONFIG import Config as cfg
 from pywinauto import Desktop
 from selenium.webdriver.common.keys import Keys
 import os
-from b_lib import DATABASE, b_excel, EOSDO, RABBIT, other_tools
-
+from b_lib import DATABASE, b_excel, EOSDO, RABBIT, actionfiles
 import shutil
 from dataclasses import dataclass
 from selenium.webdriver.support.ui import WebDriverWait
@@ -18,6 +15,7 @@ from pywinauto import keyboard
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from b_lib.EXCEPTION_HANDLER import ExctractPWDError
+
 
 
 @dataclass
@@ -51,7 +49,8 @@ class Selector:
     type_delivery = '//input[@id="OutgoingDocumentPage1_contents.lvCorrespondents.clDeliveryType"]'
     button_add_file = '//button[@id="component6-AddDocumentAttachmentListViewAction"]'
     button_close = '//div[@id="usr34865"]//button[contains(text(),"Закрыть")]'
-    amount_added_files = '//table[@id="component6-files"]//div[@class="document-info"]'
+    amount_added_files_close = '//table[@id="component6-files"]//div[@class="document-info"]'
+    amount_added_files_income = '//table[@id="component9-files"]//div[@class="document-info"]'
     button_main = '//button[@title="Основной"]'
     tab_approval = '//a[text()="Согласование и подписание"]'
     tab_main = '//a[text()="Основные реквизиты"]'
@@ -87,7 +86,7 @@ class Selector:
     hundred = '//ul[@class="dropdown-menu dropdown-menu-drop"]//li[text()="100"]'
     incoming_row = '//table[@id="InboxDataTable"]//tbody/tr'
     text_area = '//textarea[@id="IncomingDocumentPage1_contents.taContent"]'
-    sender = '//*[@id="0b00012d80058795"]/td[3]'
+    sender = '//*[@id="component3"]/tbody//td[3]'
     document_info = '//div[@class="document-info"]'
     send_case = '//button[@id=".btnSendDocumentToCase"]'
     all_in_checkbox = '//div[@id="dialog_body"]//th//input[contains(@id,checkbox)]'
@@ -96,10 +95,18 @@ class Selector:
     block = '//div[@class="blockUI blockOverlay"]'
     no_incoming = "//*[@id='InboxDataTable']/tbody/tr/td[contains(text(), 'отсутствуют данные')]"
     link_project = "//span[@class='fa fa-external-link-square color-white']"
-    docs ='//a[text()="Документы"]'
+    docs = '//a[text()="Документы"]'
     link_created_by_me = '//a[text()="Созданные мной"]'
     row_my_doc_first = '//table[@id="MyDocumentsDataTable"]/tbody/tr[1]'
-
+    filter_apply = '//button[@id="add-group" and contains(text(), "Фильтр применен")]'
+    type_tasks = '//input[@id="Inbox.cmpFilter.ddlItemNamePluralmock_input"]'
+    consideration = '//li[text()="На рассмотрение"]'
+    button_export_queue = '//div[@id="dialog_body"]//button[@title="Экспорт"]'
+    button_export_close = '//button[@id="component6-ExportFileListViewAction"]'
+    button_export_income = '//button[@id="component9-ExportFileListViewAction"]'
+    select_all_close = '//input[@id="component6-files-checkbox-select-all"]'
+    select_all_income = '//input[@id="component9-files-checkbox-select-all"]'
+    el_document = '//div[@class="doc-task pull-right" and contains(text(), "Электронный")]'
 
 
 class BusinessEosdo:
@@ -108,13 +115,13 @@ class BusinessEosdo:
         self.db = DATABASE.DateBase()
         self.rabbit = RABBIT.Rabbit()
         self.connection = False
-        self.tools = other_tools.Tools()
+        self.tools = actionfiles.ActionFiles
         self.excel = b_excel.Excel()
         self.task = None
         self.status = None
         self.queue = None
 
-    def open_eosdo(self, organization, max_tries=3):
+    def open_eosdo(self, organization: str, max_tries=3) -> None:
         while max_tries > 0:
             try:
                 self.entry_eosdo(organization)
@@ -122,7 +129,7 @@ class BusinessEosdo:
                 self.connection = True
                 return
             except ExctractPWDError:
-                raise ExctractPWDError
+                raise ExctractPWDError('Ошибка авторизации')
             except Exception as err:
                 max_tries -= 1
                 logging.error(f'Ошибка при открытии ЕОСДО {err}')
@@ -135,7 +142,7 @@ class BusinessEosdo:
                     time.sleep(60)
         raise
 
-    def entry_eosdo(self, organization, max_tries=10):
+    def entry_eosdo(self, organization: str, max_tries=10) -> None:
         """
         Функция открытия ЕОСДО
         :return:
@@ -152,7 +159,7 @@ class BusinessEosdo:
         if self.eosdo.exists_by_xpath(Selector.entrance_error):
             logging.error('Ошибка. Неправильный логин или пароль')
             self.eosdo.close_site()
-            raise
+            raise ExctractPWDError('Ошибка авторизации')
         while 'ЕОСДО | Главная' not in self.eosdo.driver.title:
             time.sleep(1)
             logging.error('Исчерпан лимит ожидания загрузки страницы, нет возможности открыть "ЕОСДО | Главная"')
@@ -163,7 +170,8 @@ class BusinessEosdo:
             max_tries -= 1
 
     # Проверка на наличие информационных окон и если обнаружены - их закрытие.
-    def infowindows_checkANDclose(self, java=True):
+    @staticmethod
+    def infowindows_checkANDclose(java=True) -> None:
         """
         Проверка на наличие инфо окон и их закрытие.\n
         Аргументы:\n
@@ -177,18 +185,14 @@ class BusinessEosdo:
             element = Desktop(backend="uia").window(title_re='^Open.*')
 
             def worker():
-                logging.info('Вошел в def worker()')
                 element.wait("exists visible enabled ready active", timeout=10)
                 element['Open EosdoJwsLauncher'].click_input(use_log=False) if java \
                     else element['Cancel'].click_input(use_log=False)
                 time.sleep(5)
-                logging.info('вышел из def worker()')
-            worker()
+
             # Выполняю проверку закрылось ли инфо окно, если нет - снова пробую закрыть
             while element.exists(5):
-                logging.warning("Окно 'Open EosdoJwsLauncher?' не удалось закрыть. Пробую снова...")
                 worker()
-
             logging.info("Окно 'Open EosdoJwsLauncher?' успешно закрыто.")
 
         # Окно 'Security Warning' (Запуск java приложения)
@@ -197,10 +201,6 @@ class BusinessEosdo:
             element = Desktop(backend="uia").window(title='Security Information')
             element.wait("exists visible enabled ready", timeout=10)
             element.set_focus()
-            # keyboard.send_keys('{TAB}')
-            # element.wait("exists visible enabled ready", timeout=10)
-            # keyboard.send_keys('{TAB}')
-            # element.wait("exists visible enabled ready", timeout=10)
             keyboard.send_keys('{ENTER}')
             logging.info("Java окно 'Security Warning' успешно закрыто.")
 
@@ -210,122 +210,110 @@ class BusinessEosdo:
             logging.info("Ожидаю инициализацию java application...")
             count = 120
             while count > 0:
-                    if Desktop(backend="uia").window(title_re='^Starting.*').exists():
-                        count -= 1
-                    else:
-                        logging.info("Ожидание инициализации java application завершено.")
-                        return
+                if Desktop(backend="uia").window(title_re='^Starting.*').exists():
+                    count -= 1
+                    time.sleep(1)
+                else:
+                    logging.info("Ожидание инициализации java application завершено.")
+                    return
         logging.info("java application не открылось")
 
-    def reconect_eosdo(self, organization):
+    def reconect_eosdo(self, organization: str):
         # В случае ошибки повторно открываем ЕОСДО
         self.eosdo.close_site()
         logging.info('Подключусь к ЕОСДО повторно через 1 мин')
         time.sleep(60)
         self.open_eosdo(organization)
 
-    def export_files(self, path, amount_files: int = None,  max_tries=120):
-            """
-            Экспорт файлов в папку
-            :param amount_files: число файлов для загрузки
-            :param queue: очередь согласования
-            :param fio: ФИО отклонившего
-            :param max_tries: число попыток
-            """
-            logging.info('Экспортирую файлы')
-            element = 'webelement'
-            if self.__module__ == 'eosdomon':
-                if self.status == "Доработка" or self.status == "Подтверждение отправки на подписание в ЕОСДО":
-                    element = self.eosdo.find_element(r'//div[@id="dialog_body"]//button[@title="Экспорт"]')
-                elif self.status == "Закрыт":
-                    # выделяем все файлы
-                    self.eosdo.find_element('//input[@id="component6-files-checkbox-select-all"]', 10).click()
-                    element = self.eosdo.find_element('//button[@id="component6-ExportFileListViewAction"]')
-
-                    if self.eosdo.exists_by_xpath(
-                            '//div[@class="doc-task pull-right" and contains(text(), "Электронный")]', 10):
-                        amount_files += 1
-                    # TODO еще раз обсудить момент, когда скачиваются два файла
-                    # amount_files += 1
-
-            elif self.__module__ == 'eosdoreceive':
-                element_text = self.eosdo.find_element('//h2[@id="component2-headerFiles"]//span[@class="badge"]',
-                                                       3).text
-                # число файлов для загрузки
-                amount_files = int(re.findall(r'\d{1,}[)]', element_text)[0].replace(')', ''))
-                # экспортируем файлы в папку
-                self.eosdo.find_element('//input[@id="component9-files-checkbox-select-all"]',
-                                        10).click()  # выделяем все файлы
-                element = self.eosdo.find_element('//button[@id="component9-ExportFileListViewAction"]')
-                # если тип документа не Бумажный, то amount_files инкреминируемм т.к. кроме самого файла сохраняется еще файл с ЭП
-
-                if self.eosdo.exists_by_xpath('//div[@class="doc-task pull-right" and contains(text(), "Электронный")]',
-                                              10):
+    def export_files(self, path: str, amount_files: int = None, max_tries=120) -> None:
+        """
+        Экспорт файлов в папку
+        :param path:
+        :param amount_files: число файлов для загрузки
+        :param max_tries: число попыток
+        """
+        logging.info('Экспортирую файлы')
+        element = 'webelement'
+        if self.__module__ == 'eosdomon':
+            if self.status == "Доработка" or self.status == "Подтверждение отправки на подписание в ЕОСДО":
+                element = self.eosdo.find_element(Selector.button_export_queue)
+            elif self.status == "Закрыт":
+                # выделяем все файлы
+                self.eosdo.find_element(Selector.select_all_close, 10).click()
+                element = self.eosdo.find_element(Selector.button_export_close)
+                if self.eosdo.exists_by_xpath(Selector.el_document, 10):
                     amount_files += 1
-                    # TODO еще раз обсудить момент, когда скачиваются два файла
-                # amount_files += 1
+                # TODO еще раз обсудить момент, когда скачиваются два файла
 
-            while max_tries > 0:
-                element.click()  # открываем проводник
-                if self.eosdo.exists_by_xpath(Selector.button_close, 2):
-                    self.eosdo.find_element(Selector.button_close).click()
-                    time.sleep(5)
-                    max_tries -= 1
-                else:
-                    win = Desktop(backend="uia").window(best_match='Select FolderDialog')
-                    try:
-                        win.wait('ready', timeout=10, retry_interval=1)
-                        win.set_focus()
-                    except TimeoutError:
-                        max_tries -= 1
-                        logging.info('Проводник не открылся. Нажимаю Esc')
-                        keyboard.send_keys("{ESC}")
-                        continue
-                    win.click_input()
-                    logging.info('Проводник открылся')
-                    win.child_window(class_name='Edit').click_input()
-                    os.makedirs(path, exist_ok=True)
-                    #Экранирование для случаем Мальцева (норма)
-                    if '(' in path and ')' in path:
-                        keyboard.send_keys(path.replace("(", "{(}").replace(")", "{)}"), with_spaces=True)
-                    else:
-                        keyboard.send_keys(path, with_spaces=True)
-                    keyboard.send_keys('{ENTER}')
-                    win['Select Folder'].click_input()
-                    # проверяю число сохраненных файлов
-                    logging.info('Проверяю число сохраненных файлов')
-                    max_tries = 60
-                    while max_tries > 0:
-                        count_files = len([file for file in os.listdir(path)])
-                        if count_files == amount_files:
-                            logging.info(f'Число файлов в папке {count_files}')
-                            logging.info('Файлы сохранены')
-                            self.close_exporter()
-                            return
-                        else:
-                            if max_tries == 0:
-                                logging.error(
-                                    f'Время ожидания загрузки фалов истекло. Число файлов в папке {count_files} ожидалось {amount_files}')
-                                raise
-                            else:
-                                max_tries -= 1
-                                logging.info(
-                                    f'Ожидаю файлы. Число файлов в папке {count_files} ожидалось {amount_files}')
-                                time.sleep(1)
-                                continue
+        elif self.__module__ == 'eosdoreceive':
+            # экспортируем файлы в папку
+            self.eosdo.find_element(Selector.select_all_income, 10).click()  # выделяем все файлы
+            element = self.eosdo.find_element(Selector.button_export_income)
+            # если тип документа не Бумажный, то amount_files инкреминируемм т.к. кроме самого файла сохраняется еще файл с ЭП
+            # if self.eosdo.exists_by_xpath('//div[@class="doc-task pull-right" and contains(text(), "Электронный")]',
+            #                               10):
+            #     amount_files += 1
+            if self.eosdo.exists_by_xpath("//label[contains(text(), 'doc')]") is False:
+                amount_files += 1
+
+        while max_tries > 0:
+            element.click()  # открываем проводник
+            if self.eosdo.exists_by_xpath(Selector.button_close, 2):
+                self.eosdo.find_element(Selector.button_close).click()
+                time.sleep(5)
+                max_tries -= 1
             else:
-                logging.info('Проводник не открылся')
-                raise
+                win = Desktop(backend="uia").window(best_match='Select FolderDialog')
+                try:
+                    win.wait('ready', timeout=10, retry_interval=1)
+                    win.set_focus()
+                except TimeoutError:
+                    max_tries -= 1
+                    logging.info('Проводник не открылся. Нажимаю Esc')
+                    keyboard.send_keys("{ESC}")
+                    continue
+                win.click_input()
+                logging.info('Проводник открылся')
+                win.child_window(class_name='Edit').click_input()
+                os.makedirs(path, exist_ok=True)
+                # Экранирование для случаем Мальцева (норма)
+                if '(' in path and ')' in path:
+                    keyboard.send_keys(path.replace("(", "{(}").replace(")", "{)}"), with_spaces=True)
+                else:
+                    keyboard.send_keys(path, with_spaces=True)
+                keyboard.send_keys('{ENTER}')
+                win['Select Folder'].click_input()
+                # проверяю число сохраненных файлов
+                logging.info('Проверяю число сохраненных файлов')
+                max_tries = 60
+                while max_tries > 0:
+                    count_files = len([file for file in os.listdir(path)])
+                    if count_files == amount_files:
+                        logging.info(f'Число файлов в папке {count_files}')
+                        logging.info('Файлы сохранены')
+                        self.close_exporter()
+                        return
+                    else:
+                        if max_tries == 0:
+                            logging.error(
+                                f'Время ожидания загрузки фалов истекло. '
+                                f'Число файлов в папке {count_files} ожидалось {amount_files}')
+                            raise
+                        else:
+                            max_tries -= 1
+                            logging.info(
+                                f'Ожидаю файлы. Число файлов в папке {count_files} ожидалось {amount_files}')
+                            time.sleep(1)
+                            continue
+        else:
+            logging.info('Проводник не открылся')
+            raise
 
-    def create_list_sogl(self, project, version, status):
+    def create_list_sogl(self, project: str, version: str, status: str) -> json:
         """
         Создание листа согласования
         :return:
         """
-        # if self.db.get_one(task, 'ЛИСТ_СОГЛАСОВАНИЯ', 'tuple')[0] is not None:
-        #     logging.info('Лист Согласования существует')
-        #     return
-
         self.eosdo.find_element(Selector.tab_approval).click()
         logging.info('Создаю Лист согласования')
         sogl_list = {}
@@ -333,7 +321,6 @@ class BusinessEosdo:
         sogl_list['проект'] = project
         sogl_list['версия'] = version
         sogl_list['статус'] = status
-        sogl_list['почта'] = ''
         sogl_list['лист_согласования'] = {}
         time.sleep(3)
         elements = self.eosdo.find_elements(r'//table[@id="queues"]//tbody//tr', 20)
@@ -375,125 +362,9 @@ class BusinessEosdo:
         list_sogl = json.dumps(sogl_list, indent=4, ensure_ascii=False)
         logging.info('Лист согласования создан и записан в БД')
         return list_sogl
-        # self.db.do_change_db(
-        #     task, {
-        #         'СТАТУС_ЕОСДО':self.status,
-        #         'ЛИСТ_СОГЛАСОВАНИЯ':list_sogl
-        #     }
-        # )
-        # self.db.create_sogl_db(task, sogl_list)
-        # self.db.update_status(self.status, task, 'еосдо')
-
-
-
-
-    # def export_files(self, amount_files: int = None, queue=None, fio=None, max_tries=120):
-    #     """
-    #     Экспорт файлов в папку
-    #     :param amount_files: число файлов для загрузки
-    #     :param queue: очередь согласования
-    #     :param fio: ФИО отклонившего
-    #     :param max_tries: число попыток
-    #     """
-    #     logging.info('Экспортирую файлы')
-    #     element = 'webelement'
-    #     if self.__module__ == 'eosdomon':
-    #         if self.status == "Доработка" or self.status == "Подтверждение отправки на подписание в ЕОСДО":
-    #             element = self.eosdo.find_element(r'//div[@id="dialog_body"]//button[@title="Экспорт"]')
-    #         elif self.status == "Закрыт":
-    #             # выделяем все файлы
-    #             self.eosdo.find_element('//input[@id="component6-files-checkbox-select-all"]', 10).click()
-    #             element = self.eosdo.find_element('//button[@id="component6-ExportFileListViewAction"]')
-    #
-    #             if self.eosdo.exists_by_xpath(
-    #                     '//div[@class="doc-task pull-right" and contains(text(), "Электронный")]', 10):
-    #                 amount_files += 1
-    #             # TODO еще раз обсудить момент, когда скачиваются два файла
-    #             # amount_files += 1
-    #
-    #     elif self.__module__ == 'eosdoreceive':
-    #         element_text = self.eosdo.find_element('//h2[@id="component2-headerFiles"]//span[@class="badge"]', 3).text
-    #         # число файлов для загрузки
-    #         amount_files = int(re.findall(r'\d{1,}[)]', element_text)[0].replace(')', ''))
-    #         # экспортируем файлы в папку
-    #         self.eosdo.find_element('//input[@id="component9-files-checkbox-select-all"]', 10).click()  # выделяем все файлы
-    #         element = self.eosdo.find_element('//button[@id="component9-ExportFileListViewAction"]')
-    #         # если тип документа не Бумажный, то amount_files инкреминируемм т.к. кроме самого файла сохраняется еще файл с ЭП
-    #
-    #         if self.eosdo.exists_by_xpath('//div[@class="doc-task pull-right" and contains(text(), "Электронный")]', 10):
-    #             amount_files += 1
-    #             #TODO еще раз обсудить момент, когда скачиваются два файла
-    #         # amount_files += 1
-    #
-    #     while max_tries > 0:
-    #         element.click()  # открываем проводник
-    #         if self.eosdo.exists_by_xpath(Selector.button_close, 2):
-    #             self.eosdo.find_element(Selector.button_close).click()
-    #             time.sleep(5)
-    #             max_tries -= 1
-    #         else:
-    #             win = Desktop(backend="uia").window(best_match='Select FolderDialog')
-    #             try:
-    #                 win.wait('ready', timeout=10, retry_interval=1)
-    #                 win.set_focus()
-    #             except TimeoutError:
-    #                 max_tries -= 1
-    #                 logging.info('Проводник не открылся. Нажимаю Esc')
-    #                 keyboard.send_keys("{ESC}")
-    #                 continue
-    #             win.click_input()
-    #             logging.info('Проводник открылся')
-    #             win.child_window(class_name='Edit').click_input()
-    #             if fio:
-    #                 dir = os.path.join(cfg.saved_files, queue, fio)
-    #                 os.makedirs(dir, exist_ok=True)
-    #                 keyboard.send_keys(fr'{cfg.saved_files}\{queue}\{fio.replace("(", "{(}").replace(")", "{)}")}',
-    #                                    with_spaces=True)
-    #             else:
-    #                 if queue:
-    #                     dir = os.path.join(cfg.saved_files, queue)
-    #                     # если статус документа Закрыт
-    #                 else:
-    #                     dir = cfg.saved_files
-    #                 os.makedirs(dir, exist_ok=True)
-    #                 keyboard.send_keys(dir, with_spaces=True)
-    #
-    #             keyboard.send_keys('{ENTER}')
-    #             win['Select Folder'].click_input()
-    #             # проверяю число сохраненных файлов
-    #             logging.info('Проверяю число сохраненных файлов')
-    #             max_tries = 60
-    #             while max_tries > 0:
-    #                 count_files = len([file for file in os.listdir(dir)])
-    #                 if count_files == amount_files:
-    #                     logging.info(f'Число файлов в папке {count_files}')
-    #                     logging.info('Файлы сохранены')
-    #                     self.close_exporter()
-    #                     return
-    #                 else:
-    #                     if max_tries == 0:
-    #                         logging.error(
-    #                             f'Время ожидания загрузки фалов истекло. Число файлов в папке {count_files} ожидалось {amount_files}')
-    #                         raise
-    #                     else:
-    #                         max_tries -= 1
-    #                         logging.info(f'Ожидаю файлы. Число файлов в папке {count_files} ожидалось {amount_files}')
-    #                         time.sleep(1)
-    #                         continue
-    #     else:
-    #         logging.info('Проводник не открылся')
-    #         raise
-
-    def clean_dir(self, path):
-        for file in os.listdir(path):
-            if os.path.isdir(os.path.join(path, file)):
-                shutil.rmtree(os.path.join(path, file), ignore_errors=False)
-            else:
-                os.remove(os.path.join(path, file))
-        logging.info(f'Директория {cfg.saved_files} очищена')
 
     @staticmethod
-    def launcher_handler(timeout):
+    def launcher_handler(timeout: int) -> None:
         """
         Закрытие окна Open EosdoJwsLauncher
         :param timeout: время ожидания появления окна
@@ -516,7 +387,7 @@ class BusinessEosdo:
             logging.info('Окно Open EosdoJwsLauncher не появилось! Продолжаем')
 
     @staticmethod
-    def application_handler(timeout):
+    def application_handler(timeout: int) -> None:
         """
         Закрытие окна Starting application
         :param timeout: время ожидания появления окна
@@ -534,7 +405,7 @@ class BusinessEosdo:
             logging.error(err)
             logging.info('Окно Starting application не появилось! Продолжаем')
 
-    def exit_eosdo(self):
+    def exit_eosdo(self) -> None:
         """
         Функция выхода из ЕОСДО
         :return:
@@ -546,7 +417,8 @@ class BusinessEosdo:
             logging.error(f'Ошибка при выходе из ЕОСДО {err}')
         self.eosdo.close_site()
 
-    def clean_fild(self, element):
+    @staticmethod
+    def clean_fild(element):
         element.send_keys(Keys.CONTROL + 'a')
         element.send_keys(Keys.DELETE)
         time.sleep(1)

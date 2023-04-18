@@ -63,9 +63,9 @@ class BusinessPost:
         self.send_mail(cfg.support_email, subject)
 
     def get_inbox(self, max_tries=3):
-        outlook = self.connection()
         while max_tries > 0:
             try:
+                outlook = self.connection()
                 # Получаю пространство имен объекта
                 namespace = outlook.GetNamespace("MAPI")
                 # Получаю непрочитанные письма из папки "Входящие" (константа "6")
@@ -74,11 +74,11 @@ class BusinessPost:
             except Exception as err:
                 logging.error(f'Пробую повторно получить непрочитанные письма из папки "Входящие". Ошибка {err}')
                 max_tries -= 1
-                time.sleep(30)
+                time.sleep(60)
         logging.error(f'Попытки проверить письма в Outlook исчерпаны')
         raise
 
-    def get_mail_data_by_subjects(self, themes):
+    def get_mail_data_by_subjects(self, themes: list):
         """
         Получить данные письма по темам писем.\n
         Возвращает список, если запрашиваемые темы есть среди непрочитанных писем:\n
@@ -176,6 +176,10 @@ class BusinessPost:
                           f'Ошибка при отправке письма через SMTP:\n\n{traceback.format_exc()}')
             raise
 
+
+if __name__ == '__main__':
+    outlook = BusinessPost()
+    outlook.get_mail_data_by_subjects(['22-9.2-15_09.02.2023'])
 
 
 

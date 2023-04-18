@@ -1,9 +1,8 @@
-import time
 
+from typing import Union
 from b_lib import log, DATABASE, RABBIT
 import logging.config
 import logging
-import urllib3
 from CONFIG import Config as cfg
 from b_lib.error_handler import ErrorHandler
 from b_lib import EXCEPTION_HANDLER
@@ -12,9 +11,8 @@ from eosdoreg import EosdoReg
 from eosdoreceive import EosdoReceive
 from sender import Sender
 from jsonschema import validate
-import os
 from Templates.shema_json import schema
-import jsonschema.exceptions
+
 
 
 class TaskFinder:
@@ -26,36 +24,36 @@ class TaskFinder:
         self.eosdo_res = EosdoReceive()
         self.sender = Sender()
 
-    def run_process(self, obj, tasks):
+    def run_process(self, obj: Union[EosdoReg, EosdoMon, EosdoReceive], tasks: list) -> None:
         tasks_organizations = self.prepare_tasks(tasks)
         for organization in tasks_organizations:
             logging.info(f'Обрабатываю задания для {organization}')
             obj.start_process(tasks_organizations[organization], organization)
 
-    def validator(self, tasks:list):
+    def validator(self, tasks: list) -> list:
         valid_tasks = []
         for task in tasks:
-            self.task_id = None
-            self.queue_response = None
+            self.task = None
+            self.queue = None
             try:
-                self.queue_response = task['header']['replayRoutingKey']
-                self.task_id = task['header']["requestID"]
+                self.queue = task['header']['replayRoutingKey']
+                self.task = task['header']["requestID"]
                 validate(task, schema)
-                logging.info(f'Запрос {self.task_id} валиден.')
+                logging.info(f'Запрос {self.task} валиден.')
                 valid_tasks.append(task)
             except Exception as error:
-                if self.queue_response is None:
-                    self.queue_response = cfg.queue_error
+                if self.queue is None:
+                    self.queuee = cfg.queue_error
                 logging.error(error)
-                EXCEPTION_HANDLER.ExceptionHandler().exception_handler(queue=self.queue_response,
-                                                                       tasks=self.task_id,
+                EXCEPTION_HANDLER.ExceptionHandler().exception_handler(queue=self.queue,
+                                                                       tasks=self.task,
                                                                        type_error=f'Запрос не валиден: {error}',
                                                                        to_rabbit='on', to_mail='on')
-                logging.info(f'Запрос {self.task_id} не валиден. Задание не принято в обработку')
+                logging.info(f'Запрос {self.task} не валиден. Задание не принято в обработку')
         return valid_tasks
 
     @EXCEPTION_HANDLER.exception_decorator
-    def main_process(self):
+    def main_process(self) -> None:
         self.db.clean_db()
         new_messages = self.rabbit.check_queue()
         valid_tasks = self.validator(new_messages)
@@ -84,11 +82,10 @@ class TaskFinder:
                 self.sender.receiving()
                 break
 
-
-    def prepare_tasks(self, tasks):
+    def prepare_tasks(self, tasks: list) -> dict:
         """
         Метод работает только по агрегированным заданиям по организации
-        {'организация А':['33765675', 388-3434], 'организация Б':['33765675', 388-3434],}
+        return {'организация А':['33765675', 388-3434], 'организация Б':['33765675', 388-3434],}
         """
         tasks_organization = {}
         organization = ''
@@ -108,11 +105,6 @@ class TaskFinder:
                 self.main_process()
 
 
-
-
-
-
-
 if __name__ == '__main__':
     log.set_1(cfg)
     logging.config.dictConfig({
@@ -124,20 +116,3 @@ if __name__ == '__main__':
     logging.info(f'Режим запуска: {cfg.mode}')
     task_finder = TaskFinder()
     task_finder.run()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

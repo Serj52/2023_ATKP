@@ -4,42 +4,52 @@ from b_lib.RABBIT import Rabbit
 import logging
 import json
 import traceback
-import smtplib
 from b_lib.DATABASE import DateBase
 import b_lib.b_post
 import uuid
-
+from psycopg2.errorcodes import UNIQUE_VIOLATION
+from psycopg2 import errors
 
 
 def exception_decorator(method):
     def wraper(self, *args):
         try:
-           return method(self, *args)
+            return method(self, *args)
+        except errors.lookup(UNIQUE_VIOLATION) as err:
+            logging.error(err)
+            ExceptionHandler().exception_handler(queue=self.queue, tasks=self.task,
+                                                 type_error=f'Задание с таким id существует',
+                                                 to_rabbit='on', to_mail='on', rec_to_db=False)
+
         except TemplateError as err:
-            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найден шаблон', to_rabbit='on')
+            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найден шаблон', to_rabbit='on',
+                                  to_mail='on')
         except NotFoundEmployee as err:
-            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найдено ФИО', to_rabbit='on')
+            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найдено ФИО', to_rabbit='on',
+                                  to_mail='on', code=1003)
 
         except NotFoundOrganization as err:
             err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найдена Организация',
-                                  to_rabbit='on')
+                                  to_rabbit='on', to_mail='on', code=1004)
         except NotFoundDocument as err:
-            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найден документ')
+            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Не найден связанный документ', to_rabbit='on',
+                                  to_mail='on', code=1002)
 
         except SendError as err:
             err.exception_handler(queue=self.queue, tasks=self.task, type_error='Ошибка при отправке почты',
                                   to_rabbit='on', to_mail='on')
 
         except ReceivingError as err:
-            err.exception_handler(tasks=self.task, type_error='Ошибка при мониторинге почты', to_mail='on', stop_robot='on')
+            err.exception_handler(tasks=self.task, type_error='Ошибка при мониторинге почты', to_mail='on',
+                                  stop_robot='on')
 
         except SaveProjectError as err:
             err.exception_handler(queue=self.queue, tasks=self.task, type_error='Ошибка при сохрании данных о проекте',
                                   to_rabbit='on')
 
         except ExctractPWDError as err:
-            err.exception_handler(queue=self.queue, tasks=self.task, type_error='Ошибка при извлечении пароля для ЕОСДО',
-                                  to_rabbit='on', to_mail='on')
+            err.exception_handler(queue=self.queue, tasks=self.tasks, type_error='Ошибка авторизации',
+                                  to_rabbit='on', to_mail='on', code=1001)
 
         except AuthorizationError as err:
             if self.__class__.__name__ == 'EosdoReg':
@@ -58,41 +68,35 @@ def exception_decorator(method):
                                       to_mail='on')
 
         except AddedFileError as err:
-            err.exception_handler(queue=self.queue, tasks=self.tasks, type_error='Ошибка при добавлении файла в ЕОСДО',
-                                  to_rabbit='on', to_mail='on')
+            err.exception_handler(queue=self.queue, tasks=self.tasks, type_error='Ошибка при добавлении файлов в ЕОСДО',
+                                  to_rabbit='on', to_mail='on', code=1005)
 
         except json.JSONDecodeError as err:
             logging.error(err)
             if method.__name__ == 'check_queue':
                 logging.error(f'Ошибка кодировки в запросе {err}. Ожидал json.')
                 ExceptionHandler().exception_handler(queue=cfg.queue_error,
-                                                     text_error='Проверьте кодировку. Ожидал json',
                                                      type_error='bad_request', to_rabbit='on')
 
     return wraper
 
 
-
 class ExceptionHandler:
 
-    def exception_handler(self, queue=None, text_error='', tasks=None, type_error=None,
-                          to_rabbit='off', to_mail='off', stop_robot='', rec_to_db=True):
+    def exception_handler(self, queue=None, tasks=None, type_error=None,
+                          to_rabbit='off', to_mail='off', stop_robot='', rec_to_db=True, code=None):
         """
         Обработка исключений
         :param queue: очередь для отправки сообщений
-        :param text_error: текст сообщения об исклчюении
         :param tasks: id запроса
-        :param parameters_request: параметры запроса
         :param type_error: тип ошибки
-        :param not_found_files: не найденные файлы в архиве
         :param to_rabbit: отправка сообщения через rabbit
         :param to_mail: отправка сообщения через BusinessPost
         :param stop_robot: остановка робота
         """
         try:
             trace = traceback.format_exc()
-            logging.error(f'\n\n{trace}')
-
+            # logging.error(f'\n\n{trace}')
             # запись в БД ошибки
             if rec_to_db:
                 if isinstance(tasks, list):
@@ -106,27 +110,26 @@ class ExceptionHandler:
                     for task in tasks:
                         body_task = DateBase().get_one(task, 'ЗАПРОС', cfg.table_tasks)
                         queue = body_task['header']['replayRoutingKey']
-                        json_data = self.create_error_json(type_error=type_error, task_id=task)
+                        json_data = self.create_error_json(type_error=type_error, task_id=task, code=code)
                         Rabbit().send_data_queue(queue_response=queue, data=json_data)
                 else:
-                    json_data = self.create_error_json(type_error=type_error, task_id=tasks)
+                    json_data = self.create_error_json(type_error=type_error, task_id=tasks, code=code)
                     Rabbit().send_data_queue(queue_response=queue, data=json_data)
 
             if to_mail == 'on':
-                # text = self.get_message(type_error=type_error, text_error=text_error, task_id=tasks)
                 text = type_error
                 subject = cfg.robot_name
                 body = 'Добрый день! \n ' \
-                           f'{text}\n' \
-                           f'{trace}'
+                       f'{text}\n' \
+                       f'{trace}'
                 try:
                     b_lib.b_post.BusinessPost().send_mail(address=cfg.support_email, subject=subject, body=body)
                 except Exception as err:
                     logging.error(f'Ошибка отправки уведомления через Outlook: {err}. Пробую через SMTP.')
                     b_lib.b_post.BusinessPost().send_smtp(from_mail=cfg.robot_mail,
-                                   to=cfg.support_email,
-                                   subject=subject,
-                                   text=body)
+                                                          to=cfg.support_email,
+                                                          subject=subject,
+                                                          text=body)
             if stop_robot:
                 # завершаем работу робота
                 logging.info('РОБОТ ОСТАНОВЛЕН')
@@ -143,25 +146,26 @@ class ExceptionHandler:
             except Exception as err:
                 logging.error(err)
                 b_lib.b_post.BusinessPost().send_smtp(from_mail=cfg.robot_mail,
-                               to=cfg.support_email,
-                               subject=subject,
-                               text=body)
+                                                      to=cfg.support_email,
+                                                      subject=subject,
+                                                      text=body)
+                raise
 
     @staticmethod
-    def create_error_json(type_error, task_id):
+    def create_error_json(type_error, task_id, code):
         """
         Создание файла json о возникшем исключении
         :param type_error: тип исключения
         :param task_id: id запроса
-        :param text_error: текст сообщения об исключении
         :return: json_path
         """
         with open(cfg.response_error) as out_file:
             logging.info(f'Записываю в json ошибку {type_error}')
             data = json.load(out_file)
-        data["header"]["id"] = id = str(uuid.uuid4())
+        data["header"]["requestID"] = id = str(uuid.uuid4())
         data["header"]["sourceId"] = task_id
         data["header"]["date"] = str(datetime.now())
+        data["code"] = code
         data["ErrorText"] = type_error
         data_json = json.dumps(data, indent=2, ensure_ascii=False)
         DateBase().response_db(id, data, type_error, task_id)
@@ -211,21 +215,22 @@ class WebsiteError(Exception, ExceptionHandler):
         self.txt = text
 
 
-class TemplateError(Exception,  ExceptionHandler):
-    def __init__(self, text):
-        self.txt = text
-
-class SendError(Exception,  ExceptionHandler):
+class TemplateError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
 
-class ReceivingError(Exception,  ExceptionHandler):
+class SendError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
 
-class FileProcessError(Exception,  ExceptionHandler):
+class ReceivingError(Exception, ExceptionHandler):
+    def __init__(self, text):
+        self.txt = text
+
+
+class FileProcessError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
@@ -244,29 +249,33 @@ class NotFoundElement(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
+
 class ExctractError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
+
 
 class NotFoundFiles(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
+
 class EOSDOError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
-class OpenEOSDOError(Exception,  ExceptionHandler):
+
+class OpenEOSDOError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
 
-class AuthorizationError(Exception,  ExceptionHandler):
+class AuthorizationError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
 
-class NotFoundDocument(Exception,  ExceptionHandler):
+class NotFoundDocument(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
@@ -280,13 +289,16 @@ class NotFoundOrganization(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
+
 class SaveProjectError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
 
+
 class ExctractPWDError(Exception, ExceptionHandler):
     def __init__(self, text):
         self.txt = text
+
 
 class AddedFileError(Exception, ExceptionHandler):
     def __init__(self, text):

@@ -21,6 +21,8 @@ def __init_logs(config):
     if os.path.exists(last_log_path):
         os.remove(last_log_path)
 
+
+# @by Kuznetsov - С ротацией логов по суткам.
 def set_1(config):
     """Настройка для logging №1.\n
     С ротацией логов по суткам.\n
@@ -42,6 +44,8 @@ def set_1(config):
     logging.info("*" * 100)
     logging.info("Для logging установлена конфигурация set_1.")
 
+
+# @by Vikharev - 1-н общий лог + 1-н последний (самый свежий) лог.
 def set_2(config):
     """Настройка для logging №2.\n
     1-н общий лог и 1-н последний (самый свежий) лог.\n

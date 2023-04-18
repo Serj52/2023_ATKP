@@ -35,7 +35,7 @@ class Rabbit:
 
     def send_data_queue(self, queue_response, data):
         channel = self.connection().channel()
-        channel.queue_declare(queue=queue_response, durable=True)
+        # channel.queue_declare(queue=queue_response, durable=True)
         # Отметить сообщения как устойчивые delivery_mode=2, защищенные от потери
         channel.basic_publish(exchange='',
                               routing_key=queue_response,
@@ -47,7 +47,7 @@ class Rabbit:
         channel.close()
         self.connection().close()
 
-    def check_queue(self, queue=cfg.queue_request):
+    def check_queue(self, queue=cfg.queue_request) -> list:
         """
         Получить сообщения из очереди
         """
@@ -100,3 +100,21 @@ class Rabbit:
         channel.basic_consume(queue=queue_name, on_message_callback=callback)
         print(' [*] Waiting for messages. To exit press CTRL+C')
         channel.start_consuming()
+
+
+
+if __name__ == '__main__':
+    log.set_2(cfg)
+    logging.config.dictConfig({
+        'version': 1,
+        'disable_existing_loggers': True,
+    })
+
+    logging.info('\n\n=== Start ===\n\n')
+    logging.info(f'Режим запуска: {cfg.mode}')
+    rabbit = Rabbit()
+    with open(r'D:\Robots\2023_ATKP\For_tests\request_green.json', encoding='utf-8') as file:
+        request = file.read()
+
+    rabbit.send_data_queue(cfg.queue_request, request)
+

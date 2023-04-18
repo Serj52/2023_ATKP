@@ -9,9 +9,6 @@ import os
 import logging as lg
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
-from CONFIG import Config as cfg
-from selenium.common.exceptions import NoSuchElementException
-from pywinauto import keyboard
 
 
 class Eosdo:
@@ -65,6 +62,12 @@ class Eosdo:
     def scroll_to_element(self, selector):
         element = self.find_element(selector, 10)
         self.driver.execute_script("arguments[0].scrollIntoView();", element)
+
+    def wait_loading_window(self, selector, timeout):
+        if self.exists_by_xpath(selector, 2):
+            wt = WebDriverWait(self.driver, timeout)
+            # Ожидание загрузки страницы
+            wt.until(EC.invisibility_of_element((By.XPATH, selector)))
 
     def close_site(self):
         try:
